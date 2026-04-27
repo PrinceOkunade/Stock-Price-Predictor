@@ -4,7 +4,7 @@ An end-to-end machine learning project that predicts whether a stock's **next-da
 
 ## Highlights
 
-- **Live data** — pulls real-time OHLCV data via `yfinance` (no API key required)
+- **Live data** — pulls real-time OHLCV data via `yfinance` 
 - **20+ engineered features** — returns, moving averages, RSI, MACD, Bollinger Bands, ATR, OBV, and more
 - **Time-based train/test split** — prevents look-ahead bias (no future data leaks into training)
 - **3 models compared** — Logistic Regression, Random Forest, XGBoost
