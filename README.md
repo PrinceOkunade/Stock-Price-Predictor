@@ -1,6 +1,6 @@
 # Stock Price Direction Predictor
 
-An end-to-end machine learning project that predicts whether a stock's **next-day closing price will go UP or DOWN** using **live market data** from Yahoo Finance, technical indicators, and an XGBoost classifier — served through an interactive Streamlit dashboard with SHAP explanations.
+An end-to-end machine learning project that predicts whether a stock's **next-day closing price will go UP or DOWN** using **live market data** from Yahoo Finance, technical indicators, and an XGBoost classifier, served through an interactive Streamlit dashboard with SHAP explanations.
 
 ## Highlights
 
@@ -100,7 +100,7 @@ The notebook generates visualisations in `images/`:
 
 ## Disclaimer
 
-This is an **educational project**, not financial advice. Past performance does not guarantee future results. Do not use these predictions to make real trading decisions.
+This is a **project**, not financial advice. Past performance does not guarantee future results. Do not use these predictions to make real trading decisions.
 
 ## License
 
