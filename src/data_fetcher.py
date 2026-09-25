@@ -1,11 +1,12 @@
 """Module 1: Fetches live stock data from Yahoo Finance API."""
+import pandas as pd
 import yfinance as yf
 
 
 def _flatten_columns(data):
-    """Flatten MultiIndex columns returned by newer yfinance versions."""
-    if isinstance(data.columns, __import__('pandas').MultiIndex):
-        data.columns = [col[0] if col[1] == "" else col[0] for col in data.columns]
+    """Flatten (Price, Ticker) MultiIndex columns returned by newer yfinance versions."""
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
     return data
 
 

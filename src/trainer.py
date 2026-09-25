@@ -74,7 +74,9 @@ def tune_best_model(X_train, y_train, X_test, y_test):
         "subsample": [0.8, 1.0],
         "colsample_bytree": [0.8, 1.0],
     }
-    xgb = XGBClassifier(random_state=42, eval_metric="logloss")
+    # One thread per fit: GridSearchCV already parallelises across fits, and
+    # nested parallelism oversubscribes the CPU (and can hang in Jupyter).
+    xgb = XGBClassifier(random_state=42, eval_metric="logloss", n_jobs=1)
     grid = GridSearchCV(
         xgb, param_grid,
         scoring="roc_auc",
