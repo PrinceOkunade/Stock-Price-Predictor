@@ -10,13 +10,15 @@ import shap
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 import streamlit as st
+from sklearn.base import clone
+from sklearn.metrics import accuracy_score, roc_auc_score
 
 SRC_DIR = Path(__file__).resolve().parent
 MODELS_DIR = SRC_DIR.parent / "models"
 sys.path.insert(0, str(SRC_DIR))
 
-from data_fetcher import fetch_stock_data, get_latest_price
-from feature_engineer import engineer_features
+from data_fetcher import fetch_stock_data
+from feature_engineer import engineer_features, latest_feature_row
 
 st.set_page_config(page_title="Stock Direction Predictor", page_icon="📈", layout="wide")
 
@@ -46,7 +48,7 @@ def main():
     cols = st.sidebar.columns(3)
     selected_quick = None
     for i, (sym, name) in enumerate(popular.items()):
-        if cols[i % 3].button(sym, key=f"btn_{sym}", use_container_width=True):
+        if cols[i % 3].button(sym, key=f"btn_{sym}", width="stretch"):
             selected_quick = sym
 
     default_ticker = selected_quick or "AAPL"
@@ -58,7 +60,7 @@ def main():
     if retrain:
         st.sidebar.warning("Retraining takes 2–5 minutes")
 
-    predict = st.sidebar.button("Predict", type="primary", use_container_width=True)
+    predict = st.sidebar.button("Predict", type="primary", width="stretch")
 
     if not predict:
         st.markdown("Select a stock in the sidebar and click **Predict**.")
@@ -102,16 +104,20 @@ def main():
         xaxis_rangeslider_visible=False, height=450,
         title=f"{ticker} — Last 60 Trading Days", legend=dict(orientation="h"),
     )
-    st.plotly_chart(fig_candle, use_container_width=True)
+    st.plotly_chart(fig_candle, width="stretch")
     st.caption(f"Data fetched live from Yahoo Finance at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     # --- Feature engineering ---
     with st.spinner("Engineering features..."):
         data, feature_cols = engineer_features(df)
+        # `data` only holds rows whose next-day outcome is known; the live
+        # prediction must use the latest row, whose outcome is still unknown.
+        latest = latest_feature_row(df)
+        latest_date = latest["Date"].iloc[0].date()
 
     # --- Section 2: Technical indicators ---
     with st.expander("📉 Current Technical Indicators"):
-        last_row = data.iloc[-1]
+        last_row = latest.iloc[0]
         indicators = pd.DataFrame({
             "Indicator": ["RSI (14)", "MACD", "MACD Signal", "Bollinger Width",
                           "ATR (14)", "SMA Cross (5/20)", "Volume Ratio"],
@@ -134,7 +140,7 @@ def main():
                 "High Volume" if last_row["volume_ratio"] > 1.5 else ("Low Volume" if last_row["volume_ratio"] < 0.5 else "Normal"),
             ],
         })
-        st.dataframe(indicators, use_container_width=True, hide_index=True)
+        st.dataframe(indicators, width="stretch", hide_index=True)
 
     # --- Retrain or load model ---
     if retrain:
@@ -143,6 +149,7 @@ def main():
             best_model, scaler, fnames, results, X_train, X_test, y_train, y_test = retrain_pipeline(
                 ticker, period, models_path=str(MODELS_DIR) + "/"
             )
+            load_artifacts.clear()  # saved files changed; drop the stale cached copy
             explainer = shap.TreeExplainer(best_model)
             feature_names = fnames
     else:
@@ -156,31 +163,36 @@ def main():
             )
             return
 
+    if list(feature_names) != list(feature_cols):
+        st.error(
+            "The saved model was trained on a different feature set. Check the "
+            "**Retrain model** option or re-run `notebooks/stock_prediction.ipynb`."
+        )
+        return
+
     # --- Build latest feature vector & predict ---
-    latest_features = data[feature_cols].iloc[[-1]].copy()
+    latest_features = latest[feature_cols]
     latest_features_scaled = pd.DataFrame(
         scaler.transform(latest_features),
         columns=feature_cols, index=latest_features.index,
     )
-    latest_features_scaled = latest_features_scaled.reindex(columns=feature_names, fill_value=0)
 
     proba = float(best_model.predict_proba(latest_features_scaled)[0, 1])
     pred = int(proba >= 0.5)
 
-    if proba > 0.70 or proba < 0.30:
-        strength = "STRONG"
-    elif proba > 0.55 or proba < 0.45:
-        strength = "MODERATE"
-    else:
-        strength = "WEAK"
-
     # --- Section 3: Prediction ---
     st.divider()
     st.header("🎯 Prediction")
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     c1.metric("Prediction", f"{'🟢 UP' if pred == 1 else '🔴 DOWN'}")
-    c2.metric("Confidence", f"{max(proba, 1 - proba) * 100:.1f}%")
-    c3.metric("Signal Strength", strength)
+    c2.metric("Model score P(UP)", f"{proba * 100:.1f}%")
+    st.caption(
+        f"Direction of the next trading day's close relative to the {latest_date} close. "
+        + ("Model retrained on this ticker. " if retrain else
+           "Using the saved model (trained on AAPL); tick **Retrain** to fit this ticker. ")
+        + "The score is the model's raw output, not a calibrated probability: check the "
+        "backtest below before reading anything into it."
+    )
 
     # --- Section 4: SHAP ---
     st.divider()
@@ -207,26 +219,28 @@ def main():
     # --- Section 5: Backtest ---
     st.divider()
     st.subheader("📈 Model Backtest")
-    if not retrain:
-        from trainer import prepare_data, train_and_evaluate
-        X_train, X_test, y_train, y_test, _, _ = prepare_data(data, feature_cols)
-        best_model.fit(X_train, y_train)
+    # Out-of-sample: fit a fresh copy (same hyperparameters) on the first 80% of
+    # this ticker's history with its own scaler, then trade the last 20%.
+    # Cloning leaves the cached/saved model untouched.
+    from trainer import prepare_data
+    X_train, X_test, y_train, y_test, _, _ = prepare_data(data, feature_cols)
+    bt_model = clone(best_model).fit(X_train, y_train)
+    y_test_pred = bt_model.predict(X_test)
+    y_test_proba = bt_model.predict_proba(X_test)[:, 1]
 
-    y_test_pred = best_model.predict(
-        pd.DataFrame(scaler.transform(data[feature_cols].iloc[-len(data[feature_cols])//5:]),
-                     columns=feature_cols)
-        .reindex(columns=feature_names, fill_value=0)
-    ) if not retrain else best_model.predict(
-        pd.DataFrame(scaler.transform(data[feature_cols].iloc[-len(y_test):]),
-                     columns=feature_cols).reindex(columns=feature_names, fill_value=0)
-    )
-
-    test_slice = data.iloc[-len(y_test_pred):].copy()
-    test_slice["daily_return"] = test_slice["Close"].pct_change()
-    test_slice["strategy_return"] = test_slice["daily_return"] * pd.Series(y_test_pred, index=test_slice.index)
-    test_slice["cumulative_market"] = (1 + test_slice["daily_return"]).cumprod()
+    # A signal on day t (features at t's close) earns the return from t's close
+    # to t+1's close, i.e. the return the target was defined on.
+    next_return = df.set_index("Date")["Close"].pct_change().shift(-1)
+    test_slice = data.loc[X_test.index].copy()
+    test_slice["next_return"] = test_slice["Date"].map(next_return)
+    test_slice["strategy_return"] = test_slice["next_return"] * y_test_pred
+    test_slice["cumulative_market"] = (1 + test_slice["next_return"]).cumprod()
     test_slice["cumulative_strategy"] = (1 + test_slice["strategy_return"]).cumprod()
-    test_slice = test_slice.dropna()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Test accuracy", f"{accuracy_score(y_test, y_test_pred) * 100:.1f}%")
+    c2.metric("Test ROC-AUC", f"{roc_auc_score(y_test, y_test_proba):.3f}")
+    c3.metric("Always-UP baseline", f"{y_test.mean() * 100:.1f}%")
 
     fig_bt = go.Figure()
     fig_bt.add_trace(go.Scatter(x=test_slice["Date"], y=test_slice["cumulative_market"],
@@ -235,8 +249,13 @@ def main():
                                 name="Model Strategy", line=dict(color="green")))
     fig_bt.update_layout(title="Cumulative Returns: Model vs Buy & Hold",
                          yaxis_title="Cumulative Return", height=400)
-    st.plotly_chart(fig_bt, use_container_width=True)
-    st.caption("⚠️ Past performance does not guarantee future results.")
+    st.plotly_chart(fig_bt, width="stretch")
+    st.caption(
+        "Held-out last 20% of the period. The strategy holds the stock for the next day "
+        "when the model predicts UP and sits in cash otherwise (no costs or slippage). "
+        "An ROC-AUC near 0.5 means no better than a coin flip. "
+        "⚠️ Past performance does not guarantee future results."
+    )
 
     # --- Footer ---
     st.divider()
